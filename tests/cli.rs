@@ -2560,3 +2560,63 @@ fn resolve_parent_all_not_found_exits_4() {
     }
     assert!(!post.matched());
 }
+
+#[test]
+fn market_reports_create_rejects_search_null_flag() {
+    let mut env = Env::new();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/market-report-pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "market-reports",
+            "create",
+            "--slug",
+            "q1",
+            "--anchor-text",
+            "Q1 Report",
+            "--search",
+            "null",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--search-criteria or --search is required to create a market report",
+        ));
+
+    assert!(!post.matched());
+}
+
+#[test]
+fn market_reports_create_rejects_data_search_null() {
+    let mut env = Env::new();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/market-report-pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "market-reports",
+            "create",
+            "--slug",
+            "q1",
+            "--anchor-text",
+            "Q1 Report",
+            "--data",
+            r#"{"search": null}"#,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--search-criteria or --search is required to create a market report",
+        ));
+
+    assert!(!post.matched());
+}

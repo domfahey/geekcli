@@ -226,7 +226,7 @@ pub fn run(ctx: &Context, cmd: MarketReportsCommand) -> Result<()> {
         MarketReportsSub::Create(fields) => {
             let payload = fields.payload(ctx)?;
             pages::require(&payload, &["slug", "anchor_text"], LABEL)?;
-            if !payload.contains("search") {
+            if payload.0.get("search").is_none_or(Value::is_null) {
                 return Err(Error::Usage(
                     "--search-criteria or --search is required to create a market report".into(),
                 ));
