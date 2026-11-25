@@ -279,17 +279,29 @@ fn scopes(args: &LoginArgs) -> Vec<String> {
 }
 
 fn default_key_name() -> String {
-    let host = std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .or_else(|| {
+    default_key_name_from(
+        std::env::var("HOSTNAME").ok(),
+        std::env::var("COMPUTERNAME").ok(),
+        || {
             std::process::Command::new("hostname")
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string())
-        })
-        .filter(|h| !h.is_empty())
+        },
+    )
+}
+
+fn default_key_name_from(
+    hostname: Option<String>,
+    computername: Option<String>,
+    fallback_cmd: impl FnOnce() -> Option<String>,
+) -> String {
+    let set = |h: &String| !h.is_empty();
+    let host = hostname
+        .filter(set)
+        .or_else(|| computername.filter(set))
+        .or_else(|| fallback_cmd().filter(set))
         .unwrap_or_else(|| "unknown host".to_string());
     let name = format!("Real Geeks CLI on {host}");
     name.chars().take(100).collect()
@@ -400,4 +412,40 @@ fn aliases_from_me(me: &Value, key: &str, verbose: bool) -> Vec<String> {
 pub fn key_prefix(key: &str) -> String {
     let shown: String = key.chars().take(16).collect();
     format!("{shown}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_key_name_prefers_env_falls_back_and_truncates() {
+        assert_eq!(
+            default_key_name_from(Some("laptop".into()), None, || None),
+            "Real Geeks CLI on laptop"
+        );
+        assert_eq!(
+            default_key_name_from(None, Some("WINBOX".into()), || None),
+            "Real Geeks CLI on WINBOX"
+        );
+        assert_eq!(
+            default_key_name_from(None, None, || Some("from-cmd".into())),
+            "Real Geeks CLI on from-cmd"
+        );
+        assert_eq!(
+            default_key_name_from(None, None, || Some(String::new())),
+            "Real Geeks CLI on unknown host"
+        );
+        // an empty HOSTNAME falls through to the next source
+        assert_eq!(
+            default_key_name_from(Some(String::new()), Some("WINBOX".into()), || None),
+            "Real Geeks CLI on WINBOX"
+        );
+        assert_eq!(
+            default_key_name_from(Some(String::new()), None, || Some("laptop".into())),
+            "Real Geeks CLI on laptop"
+        );
+        let long = default_key_name_from(Some("a".repeat(120)), None, || None);
+        assert_eq!(long.chars().count(), 100);
+    }
 }
