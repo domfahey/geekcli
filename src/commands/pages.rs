@@ -63,7 +63,7 @@ pub enum PagesSub {
   - Leave link colour to the theme.
   - Template areas (`templates list`): --area \"Agent Name=Jordan Avery\" --area \"Agent Photo=<file URL>\"; an About Page pulls in every Agent Detail Page automatically, so make agents pages, not cards.
   - Contact links: <a class=\"popup\" href=\"/member/contact/\"> opens the contact form as an overlay on designs that support it and works as a plain link elsewhere.
-  - --parent takes an id, a /path/ or a slug. Pages nest at most 10 levels deep and a page URL is at most 200 characters.
+  - --parent takes an id, a /path/ or a slug. It is looked up on this page type first, then on content, area, agent, market report and valuation pages. A slug found on more than one other type is an error: pass the id or /path/. Pages nest at most 10 levels deep and a page URL is at most 200 characters.
   - --search-criteria is validated against `search fields`; a rejected key is one the site would have silently ignored.
   - Snapshot the page afterwards.")]
     /// Create a content page
@@ -646,10 +646,13 @@ pub fn find(ctx: &Context, resource_path: &str, reference: &str, label: &str) ->
     lookup_one(&ctx.client, resource_path, "slug", reference, label)
 }
 
-/// A parent given as id, null, path or slug. Paths are looked up on the
-/// same resource first, then the other page-tree resources, because a page
-/// may sit under any other page type (content, area, agent, market report,
-/// valuation).
+/// A parent given as id, null, path or slug. It is looked up on the same
+/// resource first, then the other page-tree resources, because a page may sit
+/// under any other page type (content, area, agent, market report,
+/// valuation). A path is unique across the site, so the first match wins. A
+/// slug is unique only within one type: a match on the command's own type
+/// wins, otherwise every type is searched and a slug found on more than one
+/// is a usage error.
 pub(super) fn resolve_parent(ctx: &Context, resource_path: &str, reference: &str) -> Result<Value> {
     const ALL_PATHS: [&str; 5] = [
         PATH,
@@ -661,21 +664,25 @@ pub(super) fn resolve_parent(ctx: &Context, resource_path: &str, reference: &str
     if let Ok(value) = parse_id_or_null(reference) {
         return Ok(value);
     }
+    let by_slug = !reference.trim().starts_with('/');
     let mut first_not_found = None;
     let mut skipped = Vec::new();
+    let mut transient: Option<Error> = None;
+    let mut found: Vec<(&str, u64)> = Vec::new();
     for path in
         std::iter::once(resource_path).chain(ALL_PATHS.into_iter().filter(|&p| p != resource_path))
     {
         match resolve_id(ctx, path, reference, "parent page") {
-            Ok(id) => return Ok(Value::from(id)),
+            Ok(id) if path == resource_path || !by_slug => return Ok(Value::from(id)),
+            Ok(id) => found.push((path, id)),
             Err(err) if err.status() == Some(404) => {
                 if first_not_found.is_none() {
                     first_not_found = Some(err);
                 }
             }
             // A narrowed key (403), disabled feature (`valuation_disabled`), or
-            // transient backend outage (5xx) on a fallback endpoint must not
-            // hide a parent under a later page type or mask a typo as auth/5xx.
+            // a transient failure (5xx, 429, network) on a fallback endpoint
+            // must not hide a parent under a later page type.
             Err(err)
                 if path != resource_path
                     && !matches!(err, Error::Usage(_))
@@ -683,16 +690,42 @@ pub(super) fn resolve_parent(ctx: &Context, resource_path: &str, reference: &str
                     && err.code() != "api_disabled"
                     && (err.status() == Some(403)
                         || err.code() == "valuation_disabled"
-                        || err.status().is_some_and(|s| s >= 500)) =>
+                        || is_transient(&err)) =>
             {
                 skipped.push(format!(
                     "{path} ({} {})",
                     err.status().unwrap_or(0),
                     err.code()
                 ));
+                if transient.is_none() && is_transient(&err) {
+                    transient = Some(err);
+                }
             }
             Err(err) => return Err(err),
         }
+    }
+    match found.as_slice() {
+        [] => {}
+        [(_, id)] => return Ok(Value::from(*id)),
+        many => {
+            let matches: Vec<String> = many
+                .iter()
+                .map(|(path, id)| format!("id {id} in {path}"))
+                .collect();
+            return Err(Error::Usage(format!(
+                "more than one parent page matches slug `{}`: {}. Pass the numeric id or the /path/ instead",
+                reference.trim(),
+                matches.join(", ")
+            )));
+        }
+    }
+    // The parent may be on a type that could not be searched: report the
+    // retryable failure, not a "no such parent" that callers act on.
+    if let Some(err) = transient {
+        return Err(with_note(
+            err,
+            &format!("while looking for parent `{}`", reference.trim()),
+        ));
     }
     let Some(not_found) = first_not_found else {
         return Err(Error::Other("no parent page endpoints".into()));
@@ -700,20 +733,73 @@ pub(super) fn resolve_parent(ctx: &Context, resource_path: &str, reference: &str
     if skipped.is_empty() {
         return Err(not_found);
     }
-    match not_found {
+    Err(with_note(
+        not_found,
+        &format!("could not search: {}", skipped.join(", ")),
+    ))
+}
+
+/// A failure worth retrying: the server or network, not the request.
+fn is_transient(err: &Error) -> bool {
+    matches!(err, Error::Network(_))
+        || err.status() == Some(429)
+        || err.status().is_some_and(|s| s >= 500)
+}
+
+/// Append `(note)` to an API or network error's message.
+fn with_note(err: Error, note: &str) -> Error {
+    match err {
         Error::Api {
             status,
             code,
             message,
             fields,
             retry_after,
-        } => Err(Error::Api {
+        } => Error::Api {
             status,
             code,
-            message: format!("{message} (could not search: {})", skipped.join(", ")),
+            message: format!("{message} ({note})"),
             fields,
             retry_after,
-        }),
-        other => Err(other),
+        },
+        Error::Network(message) => Error::Network(format!("{message} ({note})")),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(status: u16, code: &str) -> Error {
+        Error::Api {
+            status,
+            code: code.into(),
+            message: "m".into(),
+            fields: std::collections::BTreeMap::new(),
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn transient_errors_are_the_server_rate_limit_and_network() {
+        assert!(is_transient(&Error::Network("connection reset".into())));
+        assert!(is_transient(&api(429, "rate_limited")));
+        assert!(is_transient(&api(503, "unavailable")));
+        assert!(!is_transient(&api(404, "not_found")));
+        assert!(!is_transient(&api(403, "forbidden")));
+        assert!(!is_transient(&Error::Usage("bad".into())));
+    }
+
+    #[test]
+    fn with_note_appends_to_api_and_network_messages() {
+        assert!(matches!(
+            with_note(api(503, "unavailable"), "while x"),
+            Error::Api { ref message, .. } if message == "m (while x)"
+        ));
+        assert!(matches!(
+            with_note(Error::Network("reset".into()), "while x"),
+            Error::Network(ref message) if message == "reset (while x)"
+        ));
     }
 }

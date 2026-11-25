@@ -55,7 +55,7 @@ pub enum AreaPagesSub {
   - polygon=lat,lng;… in --search-criteria scopes a custom map area (`geekcli guide polygon`).
   - Create fails without --search-criteria or --search; pass --no-search to create a page whose listings are not scoped to the area.
   - There is no draft state: the page is public as soon as it is created.
-  - --parent takes an id, a /path/ or a slug.
+  - --parent takes an id, a /path/ or a slug. It is looked up on this page type first, then on content, area, agent, market report and valuation pages. A slug found on more than one other type is an error: pass the id or /path/.
   - Snapshot the page afterwards.")]
     /// Create an area page (public immediately)
     Create(CreateArgs),

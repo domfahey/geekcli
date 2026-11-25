@@ -2620,3 +2620,180 @@ fn market_reports_create_rejects_data_search_null() {
 
     assert!(!post.matched());
 }
+
+#[test]
+fn resolve_parent_slug_found_in_two_fallback_types_is_ambiguous() {
+    let mut env = Env::new();
+    let empty = |env: &mut Env, endpoint: &str| {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("slug".into(), "downtown".into()))
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create()
+    };
+    let _primary = empty(&mut env, "/api/v3/content/pages/");
+    let _report = empty(&mut env, "/api/v3/content/market-report-pages/");
+    let _valuation = empty(&mut env, "/api/v3/content/valuation-pages/");
+    for (endpoint, id) in [
+        ("/api/v3/content/area-pages/", 10),
+        ("/api/v3/content/agent-pages/", 20),
+    ] {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("slug".into(), "downtown".into()))
+            .with_body(format!(
+                r#"{{"results":[{{"id":{id},"path":"/x{id}/downtown/"}}],"pagination":{{}}}}"#
+            ))
+            .create();
+    }
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .expect(0)
+        .create();
+
+    // Slugs are unique only within one page type: two types matching is a
+    // usage error, not "whichever type is searched first".
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "downtown",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("more than one parent page"));
+    post.assert();
+}
+
+#[test]
+fn resolve_parent_not_found_after_a_5xx_is_not_reported_as_missing() {
+    let mut env = Env::new();
+    for endpoint in [
+        "/api/v3/content/pages/",
+        "/api/v3/content/area-pages/",
+        "/api/v3/content/agent-pages/",
+        "/api/v3/content/market-report-pages/",
+    ] {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("path".into(), "/sell/".into()))
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create();
+    }
+    env.server
+        .mock("GET", "/api/v3/content/valuation-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/sell/".into()))
+        .with_status(503)
+        .with_body(r#"{"error":{"code":"unavailable","message":"try again"}}"#)
+        .create();
+
+    // The parent may be on the page type that could not be searched, so
+    // this is a retryable failure, not exit 4 "no such parent".
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/sell/",
+            "--max-retries",
+            "0",
+        ])
+        .assert()
+        .code(predicate::ne(4))
+        .stderr(predicate::str::contains("503"));
+}
+
+#[test]
+fn resolve_parent_continues_past_429_on_fallback() {
+    let mut env = Env::new();
+    for endpoint in ["/api/v3/content/pages/", "/api/v3/content/area-pages/"] {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("path".into(), "/homes/".into()))
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create();
+    }
+    env.server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/homes/".into()))
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body(r#"{"error":{"code":"rate_limited","message":"slow down"}}"#)
+        .create();
+    env.server
+        .mock("GET", "/api/v3/content/market-report-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/homes/".into()))
+        .with_body(r#"{"results":[{"id":55,"path":"/homes/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .match_body(Matcher::PartialJson(json!({"parent": 55})))
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/homes/",
+            "--max-retries",
+            "0",
+        ])
+        .assert()
+        .success();
+    post.assert();
+}
+
+#[test]
+fn market_reports_create_rejects_an_empty_search() {
+    let mut env = Env::new();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/market-report-pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .expect(0)
+        .create();
+    for data in [
+        r#"{"search": {}}"#,
+        r#"{"search": ""}"#,
+        r#"{"search": []}"#,
+    ] {
+        env.cmd()
+            .args([
+                "market-reports",
+                "create",
+                "--slug",
+                "q1",
+                "--anchor-text",
+                "Q1 Report",
+                "--data",
+                data,
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "--search-criteria or --search is required to create a market report",
+            ));
+    }
+    post.assert();
+}

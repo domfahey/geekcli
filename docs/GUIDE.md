@@ -348,7 +348,7 @@ until it is back.
 
 `--sidebar` takes a sidebar id or name; `--search` a saved search's short id,
 `--search-criteria key=value` builds one (repeat for several); `null`
-detaches either. `--parent` accepts an id, `null`, a path or a slug. Pages nest at most 10 levels deep and a page URL is at most 200 characters. Required on create:
+detaches either. `--parent` accepts an id, `null`, a path or a slug, and the parent can be any page type. It is looked up on the command's own type first, then on content, area, agent, market report and valuation pages. A slug found on more than one of those other types is a usage error (exit 2), so pass the id or the /path/. If one type could not be searched (a 5xx, rate limit or network error), the command fails with that error rather than exit 4, since the parent may be on the type it could not search. Pages nest at most 10 levels deep and a page URL is at most 200 characters. Required on create:
 `--slug` and `--anchor-text`. Slugs may contain letters, numbers, `-` and
 `_`. The resulting URL must be unique and must not be a reserved path
 (search, market reports, the blog root); those come back as validation
