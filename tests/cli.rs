@@ -1866,3 +1866,697 @@ fn guide_alfred_topic() {
                 .and(predicate::str::contains("items set tile")),
         );
 }
+
+#[test]
+fn market_reports_create_resolves_parent_from_area_pages() {
+    let mut env = Env::new();
+    let mr_miss = env
+        .server
+        .mock("GET", "/api/v3/content/market-report-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/riverside/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let pages_miss = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/riverside/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let area_hit = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/riverside/".into()))
+        .with_body(r#"{"results":[{"id":42,"path":"/riverside/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/market-report-pages/")
+        .match_body(Matcher::Json(json!({
+            "slug": "q1",
+            "anchor_text": "Q1 Report",
+            "search": 12,
+            "parent": 42
+        })))
+        .with_status(201)
+        .with_body(
+            r#"{"id":99,"path":"/riverside/q1/","url":"https://www.test.local/riverside/q1/"}"#,
+        )
+        .create();
+
+    env.cmd()
+        .args([
+            "market-reports",
+            "create",
+            "--slug",
+            "q1",
+            "--anchor-text",
+            "Q1 Report",
+            "--search",
+            "12",
+            "--parent",
+            "/riverside/",
+        ])
+        .assert()
+        .success();
+
+    mr_miss.assert();
+    pages_miss.assert();
+    area_hit.assert();
+    post.assert();
+}
+
+#[test]
+fn pages_create_resolves_parent_from_agent_pages() {
+    let mut env = Env::new();
+    let pages_miss = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let area_miss = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let agent_hit = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_body(r#"{"results":[{"id":77,"path":"/agent-jane/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .match_body(Matcher::Json(json!({
+            "slug": "bio",
+            "anchor_text": "Bio",
+            "parent": 77
+        })))
+        .with_status(201)
+        .with_body(
+            r#"{"id":88,"path":"/agent-jane/bio/","url":"https://www.test.local/agent-jane/bio/"}"#,
+        )
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "bio",
+            "--anchor-text",
+            "Bio",
+            "--parent",
+            "/agent-jane/",
+        ])
+        .assert()
+        .success();
+
+    pages_miss.assert();
+    area_miss.assert();
+    agent_hit.assert();
+    post.assert();
+}
+
+#[test]
+fn pages_create_resolves_parent_from_valuation_pages() {
+    let mut env = Env::new();
+    for endpoint in [
+        "/api/v3/content/pages/",
+        "/api/v3/content/area-pages/",
+        "/api/v3/content/agent-pages/",
+        "/api/v3/content/market-report-pages/",
+    ] {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("path".into(), "/home-worth/".into()))
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create();
+    }
+    let val_hit = env
+        .server
+        .mock("GET", "/api/v3/content/valuation-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/home-worth/".into()))
+        .with_body(r#"{"results":[{"id":55,"path":"/home-worth/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .match_body(Matcher::Json(json!({
+            "slug": "faq",
+            "anchor_text": "FAQ",
+            "parent": 55
+        })))
+        .with_status(201)
+        .with_body(
+            r#"{"id":56,"path":"/home-worth/faq/","url":"https://www.test.local/home-worth/faq/"}"#,
+        )
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "faq",
+            "--anchor-text",
+            "FAQ",
+            "--parent",
+            "/home-worth/",
+        ])
+        .assert()
+        .success();
+
+    val_hit.assert();
+    post.assert();
+}
+
+#[test]
+fn resolve_parent_ambiguous_slug_on_primary_exits_2_without_fallback() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("slug".into(), "shared".into()))
+        .with_body(
+            r#"{"results":[{"id":1,"path":"/a/shared/"},{"id":2,"path":"/b/shared/"}],"pagination":{}}"#,
+        )
+        .create();
+    // Even if a fallback endpoint has a unique match, primary ambiguity must
+    // fail immediately with exit 2 instead of falling back.
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("slug".into(), "shared".into()))
+        .with_body(r#"{"results":[{"id":99,"path":"/area/shared/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100,"path":"/area/shared/child/"}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "shared",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("more than one parent page"));
+
+    primary.assert();
+    assert!(!fallback.matched());
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_ambiguous_slug_on_fallback_propagates_exit_2() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("slug".into(), "shared-area".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("slug".into(), "shared-area".into()))
+        .with_body(
+            r#"{"results":[{"id":10,"path":"/a/shared-area/"},{"id":11,"path":"/b/shared-area/"}],"pagination":{}}"#,
+        )
+        .create();
+    let next_fallback = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "shared-area",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("more than one parent page"));
+
+    primary.assert();
+    fallback.assert();
+    assert!(!next_fallback.matched());
+    assert!(!post.matched());
+}
+
+#[test]
+fn pages_create_resolves_parent_past_403_on_area_pages() {
+    let mut env = Env::new();
+    let pages_miss = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let area_forbidden = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_status(403)
+        .with_body(r#"{"error":{"code":"forbidden","message":"missing area_pages:write scope"}}"#)
+        .create();
+    let agent_hit = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/agent-jane/".into()))
+        .with_body(r#"{"results":[{"id":77,"path":"/agent-jane/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .match_body(Matcher::Json(json!({
+            "slug": "bio",
+            "anchor_text": "Bio",
+            "parent": 77
+        })))
+        .with_status(201)
+        .with_body(
+            r#"{"id":88,"path":"/agent-jane/bio/","url":"https://www.test.local/agent-jane/bio/"}"#,
+        )
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "bio",
+            "--anchor-text",
+            "Bio",
+            "--parent",
+            "/agent-jane/",
+        ])
+        .assert()
+        .success();
+
+    pages_miss.assert();
+    area_forbidden.assert();
+    agent_hit.assert();
+    post.assert();
+}
+
+#[test]
+fn resolve_parent_403_on_fallback_exits_4_with_skipped_note() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/restricted/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/restricted/".into()))
+        .with_status(403)
+        .with_body(r#"{"error":{"code":"forbidden","message":"no access"}}"#)
+        .create();
+    let remaining: Vec<_> = [
+        "/api/v3/content/agent-pages/",
+        "/api/v3/content/market-report-pages/",
+        "/api/v3/content/valuation-pages/",
+    ]
+    .into_iter()
+    .map(|endpoint| {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("path".into(), "/restricted/".into()))
+            .expect(1)
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create()
+    })
+    .collect();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/restricted/",
+        ])
+        .assert()
+        .code(4)
+        .stderr(
+            predicate::str::contains("no parent page")
+                .and(predicate::str::contains("content/area-pages/"))
+                .and(predicate::str::contains("403")),
+        );
+
+    primary.assert();
+    fallback.assert();
+    for mock in remaining {
+        mock.assert();
+    }
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_403_on_primary_aborts_immediately() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/restricted/".into()))
+        .with_status(403)
+        .with_body(r#"{"error":{"code":"forbidden","message":"no access"}}"#)
+        .create();
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .with_body(r#"{"results":[{"id":42,"path":"/restricted/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/restricted/",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("forbidden"));
+
+    primary.assert();
+    assert!(!fallback.matched());
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_api_disabled_on_fallback_aborts_immediately() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/disabled/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/disabled/".into()))
+        .with_status(403)
+        .with_body(r#"{"error":{"code":"api_disabled","message":"API disabled"}}"#)
+        .create();
+    let next_fallback = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .with_body(r#"{"results":[{"id":77,"path":"/disabled/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/disabled/",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("api_disabled"));
+
+    primary.assert();
+    fallback.assert();
+    assert!(!next_fallback.matched());
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_401_on_fallback_aborts_immediately() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/unauth/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let fallback = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/unauth/".into()))
+        .with_status(401)
+        .with_body(r#"{"error":{"code":"invalid_token","message":"bad key"}}"#)
+        .create();
+    let next_fallback = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .with_body(r#"{"results":[{"id":77,"path":"/unauth/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/unauth/",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("invalid_token"));
+
+    primary.assert();
+    fallback.assert();
+    assert!(!next_fallback.matched());
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_continues_past_502_or_503_on_fallback_and_finds_later_parent() {
+    let mut env = Env::new();
+    let primary = env
+        .server
+        .mock("GET", "/api/v3/content/pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/reports/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let area_miss = env
+        .server
+        .mock("GET", "/api/v3/content/area-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/reports/".into()))
+        .with_body(r#"{"results":[],"pagination":{}}"#)
+        .create();
+    let agent_unavailable = env
+        .server
+        .mock("GET", "/api/v3/content/agent-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/reports/".into()))
+        .with_status(502)
+        .with_body(r#"{"error":{"code":"crm_unavailable","message":"CRM is down"}}"#)
+        .create();
+    let report_hit = env
+        .server
+        .mock("GET", "/api/v3/content/market-report-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/reports/".into()))
+        .with_body(r#"{"results":[{"id":55,"path":"/reports/"}],"pagination":{}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .match_body(Matcher::Json(json!({
+            "slug": "child",
+            "anchor_text": "Child",
+            "parent": 55
+        })))
+        .with_status(201)
+        .with_body(
+            r#"{"id":100,"path":"/reports/child/","url":"https://www.test.local/reports/child/"}"#,
+        )
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/reports/",
+        ])
+        .assert()
+        .success();
+
+    primary.assert();
+    area_miss.assert();
+    agent_unavailable.assert();
+    report_hit.assert();
+    post.assert();
+}
+
+#[test]
+fn resolve_parent_continues_past_valuation_disabled_on_typo_and_exits_4() {
+    let mut env = Env::new();
+    let misses: Vec<_> = [
+        "/api/v3/content/pages/",
+        "/api/v3/content/area-pages/",
+        "/api/v3/content/agent-pages/",
+        "/api/v3/content/market-report-pages/",
+    ]
+    .into_iter()
+    .map(|endpoint| {
+        env.server
+            .mock("GET", endpoint)
+            .match_query(Matcher::UrlEncoded("path".into(), "/typo/".into()))
+            .expect(1)
+            .with_body(r#"{"results":[],"pagination":{}}"#)
+            .create()
+    })
+    .collect();
+    let valuation_disabled = env
+        .server
+        .mock("GET", "/api/v3/content/valuation-pages/")
+        .match_query(Matcher::UrlEncoded("path".into(), "/typo/".into()))
+        .with_status(409)
+        .with_body(r#"{"error":{"code":"valuation_disabled","message":"Seller Leads is off"}}"#)
+        .create();
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/typo/",
+        ])
+        .assert()
+        .code(4)
+        .stderr(
+            predicate::str::contains("no parent page")
+                .and(predicate::str::contains("content/valuation-pages/"))
+                .and(predicate::str::contains("409"))
+                .and(predicate::str::contains("valuation_disabled")),
+        );
+
+    for mock in misses {
+        mock.assert();
+    }
+    valuation_disabled.assert();
+    assert!(!post.matched());
+}
+
+#[test]
+fn resolve_parent_all_not_found_exits_4() {
+    let mut env = Env::new();
+    let mut mocks = Vec::new();
+    for endpoint in [
+        "/api/v3/content/pages/",
+        "/api/v3/content/area-pages/",
+        "/api/v3/content/agent-pages/",
+        "/api/v3/content/market-report-pages/",
+        "/api/v3/content/valuation-pages/",
+    ] {
+        mocks.push(
+            env.server
+                .mock("GET", endpoint)
+                .match_query(Matcher::UrlEncoded("path".into(), "/missing/".into()))
+                .expect(1)
+                .with_body(r#"{"results":[],"pagination":{}}"#)
+                .create(),
+        );
+    }
+    let post = env
+        .server
+        .mock("POST", "/api/v3/content/pages/")
+        .with_status(201)
+        .with_body(r#"{"id":100}"#)
+        .create();
+
+    env.cmd()
+        .args([
+            "pages",
+            "create",
+            "--slug",
+            "child",
+            "--anchor-text",
+            "Child",
+            "--parent",
+            "/missing/",
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("no parent page"));
+
+    for mock in mocks {
+        mock.assert();
+    }
+    assert!(!post.matched());
+}

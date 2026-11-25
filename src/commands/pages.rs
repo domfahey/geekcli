@@ -647,18 +647,73 @@ pub fn find(ctx: &Context, resource_path: &str, reference: &str, label: &str) ->
 }
 
 /// A parent given as id, null, path or slug. Paths are looked up on the
-/// same resource first, then the other tree resource, because a content
-/// page may sit under an area page and vice versa.
+/// same resource first, then the other page-tree resources, because a page
+/// may sit under any other page type (content, area, agent, market report,
+/// valuation).
 pub(super) fn resolve_parent(ctx: &Context, resource_path: &str, reference: &str) -> Result<Value> {
+    const ALL_PATHS: [&str; 5] = [
+        PATH,
+        AREA_PATH,
+        super::agent_pages::PATH,
+        super::market_reports::PATH,
+        super::valuation_pages::PATH,
+    ];
     if let Ok(value) = parse_id_or_null(reference) {
         return Ok(value);
     }
-    let other = if resource_path == PATH {
-        AREA_PATH
-    } else {
-        PATH
+    let mut first_not_found = None;
+    let mut skipped = Vec::new();
+    for path in
+        std::iter::once(resource_path).chain(ALL_PATHS.into_iter().filter(|&p| p != resource_path))
+    {
+        match resolve_id(ctx, path, reference, "parent page") {
+            Ok(id) => return Ok(Value::from(id)),
+            Err(err) if err.status() == Some(404) => {
+                if first_not_found.is_none() {
+                    first_not_found = Some(err);
+                }
+            }
+            // A narrowed key (403), disabled feature (`valuation_disabled`), or
+            // transient backend outage (5xx) on a fallback endpoint must not
+            // hide a parent under a later page type or mask a typo as auth/5xx.
+            Err(err)
+                if path != resource_path
+                    && !matches!(err, Error::Usage(_))
+                    && err.status() != Some(401)
+                    && err.code() != "api_disabled"
+                    && (err.status() == Some(403)
+                        || err.code() == "valuation_disabled"
+                        || err.status().is_some_and(|s| s >= 500)) =>
+            {
+                skipped.push(format!(
+                    "{path} ({} {})",
+                    err.status().unwrap_or(0),
+                    err.code()
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let Some(not_found) = first_not_found else {
+        return Err(Error::Other("no parent page endpoints".into()));
     };
-    let id = resolve_id(ctx, resource_path, reference, "parent page")
-        .or_else(|first| resolve_id(ctx, other, reference, "parent page").map_err(|_| first))?;
-    Ok(Value::from(id))
+    if skipped.is_empty() {
+        return Err(not_found);
+    }
+    match not_found {
+        Error::Api {
+            status,
+            code,
+            message,
+            fields,
+            retry_after,
+        } => Err(Error::Api {
+            status,
+            code,
+            message: format!("{message} (could not search: {})", skipped.join(", ")),
+            fields,
+            retry_after,
+        }),
+        other => Err(other),
+    }
 }
